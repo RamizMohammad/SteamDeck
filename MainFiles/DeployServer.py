@@ -11,10 +11,10 @@ from flask import Flask
 # ======================
 # MongoDB Setup (from environment variables)
 # ======================
-MONGO_USER = os.getenv("MONGO_USER", "default_user")
-MONGO_PASS = os.getenv("MONGO_PASS", "default_pass")
-MONGO_HOST = os.getenv("MONGO_HOST", "stemdeck.h9p3m3i.mongodb.net")
-MONGO_DBNAME = os.getenv("MONGO_DBNAME", "tcp_relay_app")
+MONGO_USER = os.getenv("MONGO_USER")
+MONGO_PASS = os.getenv("MONGO_PASS")
+MONGO_HOST = os.getenv("MONGO_HOST")
+MONGO_DBNAME = os.getenv("MONGO_DBNAME")
 
 MONGO_URI = f"mongodb+srv://{MONGO_USER}:{MONGO_PASS}@{MONGO_HOST}/?retryWrites=true&w=majority&appName=StemDeck"
 client = MongoClient(MONGO_URI)
@@ -143,7 +143,7 @@ def ping():
 # Self-Caller Thread
 # ======================
 def keep_alive():
-    url = os.getenv("KEEPALIVE_URL", "https://your-render-url.onrender.com/ping")
+    url = os.getenv("KEEPALIVE_URL", "https://steamdeck.onrender.com/ping")
     while True:
         try:
             requests.get(url, timeout=5)
