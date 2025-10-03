@@ -115,7 +115,7 @@ def client_handler(conn, addr):
 # ======================
 # TCP Server Start
 # ======================
-def start_tcp_server(host="0.0.0.0", port=9000, max_clients=50):
+def start_tcp_server(host="0.0.0.0", port=10000, max_clients=50):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
