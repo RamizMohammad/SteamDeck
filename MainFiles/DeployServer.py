@@ -3,24 +3,38 @@ import time
 import os
 import requests
 import threading
-from pymongo import MongoClient
+from pymongo import MongoClient, errors
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
 # ======================
-# MongoDB Setup
+# MongoDB Setup (Safe)
 # ======================
 MONGO_USER = os.getenv("MONGO_USER")
 MONGO_PASS = os.getenv("MONGO_PASS")
 MONGO_HOST = os.getenv("MONGO_HOST")
 MONGO_DBNAME = os.getenv("MONGO_DBNAME")
 
-MONGO_URI = f"mongodb+srv://{MONGO_USER}:{MONGO_PASS}@{MONGO_HOST}/?retryWrites=true&w=majority&appName=StemDeck"
-client = MongoClient(MONGO_URI)
-db = client[MONGO_DBNAME]
+MONGO_URI = f"mongodb+srv://{MONGO_USER}:{MONGO_PASS}@{MONGO_HOST}/{MONGO_DBNAME}?retryWrites=true&w=majority&tls=true"
 
-pairings_col = db["pairings"]
-messages_col = db["messages"]
+pairings_col = None
+messages_col = None
+
+try:
+    client = MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=5000,  # fail fast
+        tls=True,
+        tlsAllowInvalidCertificates=False
+    )
+    db = client[MONGO_DBNAME]
+    # Test connection
+    client.admin.command("ping")
+    pairings_col = db["pairings"]
+    messages_col = db["messages"]
+    print("✅ Connected to MongoDB Atlas")
+except errors.ServerSelectionTimeoutError as e:
+    print("⚠️ MongoDB connection failed:", e)
 
 # ======================
 # In-Memory Structures
@@ -69,15 +83,19 @@ async def websocket_endpoint(ws: WebSocket):
                 pairings[code] = ws
                 print(f"📌 Receiver registered with code {code}")
 
-                pairings_col.update_one(
-                    {"code": code},
-                    {"$set": {
-                        "receiver_addr": addr,
-                        "active": True,
-                        "last_updated": time.time()
-                    }},
-                    upsert=True
-                )
+                if pairings_col:
+                    try:
+                        pairings_col.update_one(
+                            {"code": code},
+                            {"$set": {
+                                "receiver_addr": addr,
+                                "active": True,
+                                "last_updated": time.time()
+                            }},
+                            upsert=True
+                        )
+                    except Exception as e:
+                        print("⚠️ Mongo update failed:", e)
 
             # Sender connects
             elif msg.get("role") == "sender":
@@ -87,16 +105,21 @@ async def websocket_endpoint(ws: WebSocket):
                     print(f"🔗 Sender linked to receiver {code}")
                     await ws.send_json({"status": "linked", "code": code})
 
-                    pairings_col.update_one(
-                        {"code": code},
-                        {"$push": {"senders": {"addr": addr, "time": time.time()}}},
-                        upsert=True
-                    )
+                    if pairings_col:
+                        try:
+                            pairings_col.update_one(
+                                {"code": code},
+                                {"$push": {"senders": {"addr": addr, "time": time.time()}}},
+                                upsert=True
+                            )
+                        except Exception as e:
+                            print("⚠️ Mongo update failed:", e)
                 else:
                     await ws.send_json({"error": "Invalid code"})
 
             # Relay messages
             else:
+                direction = "unknown"
                 if ws in sender_links:   # sender -> receiver
                     target = sender_links[ws]
                     await target.send_text(json.dumps(msg))
@@ -108,16 +131,16 @@ async def websocket_endpoint(ws: WebSocket):
                             await s.send_text(json.dumps(msg))
                     direction = "receiver->sender"
 
-                else:
-                    direction = "unknown"
-
-                # Log message
-                messages_col.insert_one({
-                    "direction": direction,
-                    "message": msg,
-                    "timestamp": time.time(),
-                    "from_addr": addr
-                })
+                if messages_col:
+                    try:
+                        messages_col.insert_one({
+                            "direction": direction,
+                            "message": msg,
+                            "timestamp": time.time(),
+                            "from_addr": addr
+                        })
+                    except Exception as e:
+                        print("⚠️ Mongo insert failed:", e)
 
     except WebSocketDisconnect:
         print(f"❌ WebSocket disconnected: {addr}")
@@ -129,7 +152,11 @@ async def websocket_endpoint(ws: WebSocket):
             for code, r in list(pairings.items()):
                 if r == ws:
                     del pairings[code]
-                    pairings_col.update_one({"code": code}, {"$set": {"active": False}})
+                    if pairings_col:
+                        try:
+                            pairings_col.update_one({"code": code}, {"$set": {"active": False}})
+                        except Exception as e:
+                            print("⚠️ Mongo update failed:", e)
         print(f"🧹 Cleaned up {addr}")
 
 # ======================
@@ -148,3 +175,9 @@ def keep_alive():
 @app.on_event("startup")
 def startup_event():
     threading.Thread(target=keep_alive, daemon=True).start()
+
+# ======================
+# Run
+# ======================
+if __name__ == "__main__":
+    uvicorn.run("DeployServer:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
