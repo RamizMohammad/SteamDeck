@@ -33,15 +33,28 @@ sender_links = {}   # sender socket -> receiver socket
 # TCP Client Handler
 # ======================
 def client_handler(conn, addr):
-    print(f"✅ Connection from {addr}")
-
+    print(f"✅ New connection from {addr}")
     try:
         while True:
             data = conn.recv(4096).decode()
-            if not data:
-                break
-            msg = json.loads(data)
 
+            if not data:
+                # client closed connection
+                print(f"👋 Client {addr} disconnected")
+                break
+
+            # ✅ Validate JSON safely
+            try:
+                if not data.strip():
+                    continue  # ignore empty packets
+                msg = json.loads(data)
+            except json.JSONDecodeError:
+                print(f"⚠️ Ignored invalid JSON from {addr}: {data!r}")
+                continue
+
+            # =====================
+            # Handle roles/messages
+            # =====================
             if msg.get("role") == "receiver":
                 code = msg["code"]
                 pairings[code] = conn
@@ -84,23 +97,30 @@ def client_handler(conn, addr):
                     direction = "unknown"
 
                 if target:
-                    if isinstance(target, list):
-                        for t in target:
-                            t.send(json.dumps(msg).encode())
-                    else:
-                        target.send(json.dumps(msg).encode())
+                    try:
+                        encoded = json.dumps(msg).encode()
+                        if isinstance(target, list):
+                            for t in target:
+                                t.send(encoded)
+                        else:
+                            target.send(encoded)
 
-                    messages_col.insert_one({
-                        "direction": direction,
-                        "message": msg,
-                        "timestamp": time.time(),
-                        "from_addr": str(addr)
-                    })
+                        # log to DB quietly
+                        messages_col.insert_one({
+                            "direction": direction,
+                            "message": msg,
+                            "timestamp": time.time(),
+                            "from_addr": str(addr)
+                        })
+                    except Exception as e:
+                        print(f"⚠️ Relay failed for {addr}: {e}")
 
     except Exception as e:
-        print("❌ Error:", e)
+        print(f"❌ Unexpected error for {addr}: {e}")
+
     finally:
         conn.close()
+        # cleanup
         if conn in sender_links:
             del sender_links[conn]
         else:
@@ -108,6 +128,7 @@ def client_handler(conn, addr):
                 if r == conn:
                     del pairings[code]
                     pairings_col.update_one({"code": code}, {"$set": {"active": False}})
+        print(f"🧹 Cleaned up {addr}")
 
 # ======================
 # TCP Server
@@ -163,9 +184,3 @@ def startup_event():
     threading.Thread(target=start_tcp_server, daemon=True).start()
     # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
-
-# ======================
-# Entry Point
-# ======================
-if __name__ == "__main__":
-    uvicorn.run("DeployServer:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
