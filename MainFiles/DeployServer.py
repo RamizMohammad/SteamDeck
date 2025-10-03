@@ -1,4 +1,3 @@
-# tcp_server.py
 import socket
 import threading
 import json
@@ -6,10 +5,11 @@ import time
 import os
 import requests
 from pymongo import MongoClient
-from flask import Flask
+from fastapi import FastAPI
+import uvicorn
 
 # ======================
-# MongoDB Setup (from environment variables)
+# MongoDB Setup (from env vars)
 # ======================
 MONGO_USER = os.getenv("MONGO_USER")
 MONGO_PASS = os.getenv("MONGO_PASS")
@@ -30,7 +30,7 @@ pairings = {}       # pairing_code -> receiver socket
 sender_links = {}   # sender socket -> receiver socket
 
 # ======================
-# Client Handler
+# TCP Client Handler
 # ======================
 def client_handler(conn, addr):
     print(f"✅ Connection from {addr}")
@@ -42,7 +42,6 @@ def client_handler(conn, addr):
                 break
             msg = json.loads(data)
 
-            # Receiver registers with code
             if msg.get("role") == "receiver":
                 code = msg["code"]
                 pairings[code] = conn
@@ -58,7 +57,6 @@ def client_handler(conn, addr):
                     upsert=True
                 )
 
-            # Sender links to receiver
             elif msg.get("role") == "sender":
                 code = msg["code"]
                 if code in pairings:
@@ -74,8 +72,7 @@ def client_handler(conn, addr):
                 else:
                     conn.send(json.dumps({"error": "Invalid code"}).encode())
 
-            # Relay
-            else:
+            else:  # Relay
                 if conn in sender_links:
                     target = sender_links[conn]
                     direction = "sender->receiver"
@@ -113,9 +110,9 @@ def client_handler(conn, addr):
                     pairings_col.update_one({"code": code}, {"$set": {"active": False}})
 
 # ======================
-# TCP Server Start
+# TCP Server
 # ======================
-def start_tcp_server(host="0.0.0.0", port=10000, max_clients=50):
+def start_tcp_server(host="0.0.0.0", port=9000, max_clients=50):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     server.bind((host, port))
@@ -127,20 +124,28 @@ def start_tcp_server(host="0.0.0.0", port=10000, max_clients=50):
         threading.Thread(target=client_handler, args=(conn, addr), daemon=True).start()
 
 # ======================
-# Flask Keep-Alive Web Server
+# FastAPI App
 # ======================
-app = Flask(__name__)
+app = FastAPI()
 
-@app.route("/")
+@app.get("/")
 def home():
-    return {"status": "ok", "message": "TCP server is running"}
+    return {"status": "ok", "message": "FastAPI TCP Relay running"}
 
-@app.route("/ping")
+@app.get("/ping")
 def ping():
     return {"alive": True, "timestamp": time.time()}
 
+@app.get("/status")
+def status():
+    return {
+        "active_pairings": list(pairings.keys()),
+        "senders_count": len(sender_links),
+        "receivers_count": len(pairings),
+    }
+
 # ======================
-# Self-Caller Thread
+# Startup Background Tasks
 # ======================
 def keep_alive():
     url = os.getenv("KEEPALIVE_URL", "https://steamdeck.onrender.com/ping")
@@ -150,17 +155,17 @@ def keep_alive():
             print("🔄 Self-ping successful")
         except Exception as e:
             print("⚠️ Keep-alive ping failed:", e)
-        time.sleep(300)  # every 5 minutes
+        time.sleep(300)  # 5 min
 
-# ======================
-# Run Everything
-# ======================
-if __name__ == "__main__":
-    # Start TCP server in background
+@app.on_event("startup")
+def startup_event():
+    # Start TCP server thread
     threading.Thread(target=start_tcp_server, daemon=True).start()
-
     # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
 
-    # Run Flask (Render exposes this HTTP server)
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
+# ======================
+# Entry Point
+# ======================
+if __name__ == "__main__":
+    uvicorn.run("DeployServer:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
