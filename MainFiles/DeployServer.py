@@ -1,15 +1,14 @@
-import socket
-import threading
 import json
 import time
 import os
 import requests
+import threading
 from pymongo import MongoClient
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
 
 # ======================
-# MongoDB Setup (from env vars)
+# MongoDB Setup
 # ======================
 MONGO_USER = os.getenv("MONGO_USER")
 MONGO_PASS = os.getenv("MONGO_PASS")
@@ -26,123 +25,8 @@ messages_col = db["messages"]
 # ======================
 # In-Memory Structures
 # ======================
-pairings = {}       # pairing_code -> receiver socket
-sender_links = {}   # sender socket -> receiver socket
-
-# ======================
-# TCP Client Handler
-# ======================
-def client_handler(conn, addr):
-    print(f"✅ New connection from {addr}")
-    try:
-        while True:
-            data = conn.recv(4096).decode()
-
-            if not data:
-                # client closed connection
-                print(f"👋 Client {addr} disconnected")
-                break
-
-            # ✅ Validate JSON safely
-            try:
-                if not data.strip():
-                    continue  # ignore empty packets
-                msg = json.loads(data)
-            except json.JSONDecodeError:
-                print(f"⚠️ Ignored invalid JSON from {addr}: {data!r}")
-                continue
-
-            # =====================
-            # Handle roles/messages
-            # =====================
-            if msg.get("role") == "receiver":
-                code = msg["code"]
-                pairings[code] = conn
-                print(f"📌 Receiver registered with code {code}")
-
-                pairings_col.update_one(
-                    {"code": code},
-                    {"$set": {
-                        "receiver_addr": str(addr),
-                        "active": True,
-                        "last_updated": time.time()
-                    }},
-                    upsert=True
-                )
-
-            elif msg.get("role") == "sender":
-                code = msg["code"]
-                if code in pairings:
-                    sender_links[conn] = pairings[code]
-                    print(f"🔗 Sender linked to receiver {code}")
-                    conn.send(json.dumps({"status": "linked", "code": code}).encode())
-
-                    pairings_col.update_one(
-                        {"code": code},
-                        {"$push": {"senders": {"addr": str(addr), "time": time.time()}}},
-                        upsert=True
-                    )
-                else:
-                    conn.send(json.dumps({"error": "Invalid code"}).encode())
-
-            else:  # Relay
-                if conn in sender_links:
-                    target = sender_links[conn]
-                    direction = "sender->receiver"
-                elif conn in pairings.values():
-                    target = [s for s, r in sender_links.items() if r == conn]
-                    direction = "receiver->sender"
-                else:
-                    target = None
-                    direction = "unknown"
-
-                if target:
-                    try:
-                        encoded = json.dumps(msg).encode()
-                        if isinstance(target, list):
-                            for t in target:
-                                t.send(encoded)
-                        else:
-                            target.send(encoded)
-
-                        # log to DB quietly
-                        messages_col.insert_one({
-                            "direction": direction,
-                            "message": msg,
-                            "timestamp": time.time(),
-                            "from_addr": str(addr)
-                        })
-                    except Exception as e:
-                        print(f"⚠️ Relay failed for {addr}: {e}")
-
-    except Exception as e:
-        print(f"❌ Unexpected error for {addr}: {e}")
-
-    finally:
-        conn.close()
-        # cleanup
-        if conn in sender_links:
-            del sender_links[conn]
-        else:
-            for code, r in list(pairings.items()):
-                if r == conn:
-                    del pairings[code]
-                    pairings_col.update_one({"code": code}, {"$set": {"active": False}})
-        print(f"🧹 Cleaned up {addr}")
-
-# ======================
-# TCP Server
-# ======================
-def start_tcp_server(host="0.0.0.0", port=9000, max_clients=50):
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    server.bind((host, port))
-    server.listen(max_clients)
-    print(f"🚀 TCP Server listening on {host}:{port} (max {max_clients} clients)")
-
-    while True:
-        conn, addr = server.accept()
-        threading.Thread(target=client_handler, args=(conn, addr), daemon=True).start()
+pairings = {}       # code -> receiver WebSocket
+sender_links = {}   # sender WebSocket -> receiver WebSocket
 
 # ======================
 # FastAPI App
@@ -151,7 +35,7 @@ app = FastAPI()
 
 @app.get("/")
 def home():
-    return {"status": "ok", "message": "FastAPI TCP Relay running"}
+    return {"status": "ok", "message": "FastAPI WebSocket Relay running"}
 
 @app.get("/ping")
 def ping():
@@ -166,7 +50,90 @@ def status():
     }
 
 # ======================
-# Startup Background Tasks
+# WebSocket Endpoint
+# ======================
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    await ws.accept()
+    addr = ws.client.host
+    print(f"✅ WebSocket connected: {addr}")
+
+    try:
+        while True:
+            data = await ws.receive_text()
+            msg = json.loads(data)
+
+            # Receiver registers
+            if msg.get("role") == "receiver":
+                code = msg["code"]
+                pairings[code] = ws
+                print(f"📌 Receiver registered with code {code}")
+
+                pairings_col.update_one(
+                    {"code": code},
+                    {"$set": {
+                        "receiver_addr": addr,
+                        "active": True,
+                        "last_updated": time.time()
+                    }},
+                    upsert=True
+                )
+
+            # Sender connects
+            elif msg.get("role") == "sender":
+                code = msg["code"]
+                if code in pairings:
+                    sender_links[ws] = pairings[code]
+                    print(f"🔗 Sender linked to receiver {code}")
+                    await ws.send_json({"status": "linked", "code": code})
+
+                    pairings_col.update_one(
+                        {"code": code},
+                        {"$push": {"senders": {"addr": addr, "time": time.time()}}},
+                        upsert=True
+                    )
+                else:
+                    await ws.send_json({"error": "Invalid code"})
+
+            # Relay messages
+            else:
+                if ws in sender_links:   # sender -> receiver
+                    target = sender_links[ws]
+                    await target.send_text(json.dumps(msg))
+                    direction = "sender->receiver"
+
+                elif ws in pairings.values():  # receiver -> sender(s)
+                    for s, r in sender_links.items():
+                        if r == ws:
+                            await s.send_text(json.dumps(msg))
+                    direction = "receiver->sender"
+
+                else:
+                    direction = "unknown"
+
+                # Log message
+                messages_col.insert_one({
+                    "direction": direction,
+                    "message": msg,
+                    "timestamp": time.time(),
+                    "from_addr": addr
+                })
+
+    except WebSocketDisconnect:
+        print(f"❌ WebSocket disconnected: {addr}")
+    finally:
+        # cleanup
+        if ws in sender_links:
+            del sender_links[ws]
+        else:
+            for code, r in list(pairings.items()):
+                if r == ws:
+                    del pairings[code]
+                    pairings_col.update_one({"code": code}, {"$set": {"active": False}})
+        print(f"🧹 Cleaned up {addr}")
+
+# ======================
+# Keep-Alive Thread
 # ======================
 def keep_alive():
     url = os.getenv("KEEPALIVE_URL", "https://steamdeck.onrender.com/ping")
@@ -180,7 +147,4 @@ def keep_alive():
 
 @app.on_event("startup")
 def startup_event():
-    # Start TCP server thread
-    threading.Thread(target=start_tcp_server, daemon=True).start()
-    # Start keep-alive thread
     threading.Thread(target=keep_alive, daemon=True).start()
