@@ -137,7 +137,6 @@ def regenerate_code():
     code = str(random.randint(10**9, (10**10) - 1))
     json.dump({"code": code}, open(CODE_FILE, "w"))
     return code
-
 # ============================
 # SETTINGS (Startup Toggle)
 # ============================
@@ -588,12 +587,24 @@ class SteamDeckApp(ctk.CTk):
         self.receiver_thread.start()
 
     def on_closing(self):
-        if self.receiver_thread:
-            self.log("🛑 Shutting down receiver thread...", "info")
-            self.receiver_thread.stop()
-            # give the thread a short moment to exit cleanly
-            self.receiver_thread.join(timeout=2)
-        self.destroy()
+        """Override window close — minimize to tray instead of exit."""
+        try:
+            # If tray exists, hide the window instead of destroying it
+            if hasattr(self, "tray") and self.tray.icon:
+                self.withdraw()
+                self.log("📥 Linkium minimized to system tray.", "info")
+                return  # Don't close app
+            else:
+                # If tray not initialized, fallback to normal close
+                if self.receiver_thread:
+                    self.log("🛑 Shutting down receiver thread...", "info")
+                    self.receiver_thread.stop()
+                    self.receiver_thread.join(timeout=2)
+                self.destroy()
+        except Exception as e:
+            print(f"[on_closing error] {e}")
+            self.destroy()
+
 
 # ============================
 # ENTRY POINT
