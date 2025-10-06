@@ -1,1 +1,7 @@
 /prototype
+/SetupFiles
+/Scripts
+/Testing
+/build
+/Ui_with_installer
+*.json
