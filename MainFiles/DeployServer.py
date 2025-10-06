@@ -6,6 +6,7 @@ import threading
 from pymongo import MongoClient, errors
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 import uvicorn
+import certifi
 
 # ======================
 # MongoDB Setup (Safe)
@@ -25,6 +26,7 @@ try:
         MONGO_URI,
         serverSelectionTimeoutMS=5000,  # fail fast
         tls=True,
+        tlsCAFile=certifi.where(),
         tlsAllowInvalidCertificates=False
     )
     db = client[MONGO_DBNAME]
@@ -83,7 +85,7 @@ async def websocket_endpoint(ws: WebSocket):
                 pairings[code] = ws
                 print(f"📌 Receiver registered with code {code}")
 
-                if pairings_col:
+                if pairings_col is not None:
                     try:
                         pairings_col.update_one(
                             {"code": code},
@@ -105,7 +107,7 @@ async def websocket_endpoint(ws: WebSocket):
                     print(f"🔗 Sender linked to receiver {code}")
                     await ws.send_json({"status": "linked", "code": code})
 
-                    if pairings_col:
+                    if pairings_col is not None:
                         try:
                             pairings_col.update_one(
                                 {"code": code},
@@ -131,7 +133,7 @@ async def websocket_endpoint(ws: WebSocket):
                             await s.send_text(json.dumps(msg))
                     direction = "receiver->sender"
 
-                if messages_col:
+                if messages_col is not None:
                     try:
                         messages_col.insert_one({
                             "direction": direction,
@@ -152,7 +154,7 @@ async def websocket_endpoint(ws: WebSocket):
             for code, r in list(pairings.items()):
                 if r == ws:
                     del pairings[code]
-                    if pairings_col:
+                    if pairings_col is not None:
                         try:
                             pairings_col.update_one({"code": code}, {"$set": {"active": False}})
                         except Exception as e:
@@ -175,9 +177,3 @@ def keep_alive():
 @app.on_event("startup")
 def startup_event():
     threading.Thread(target=keep_alive, daemon=True).start()
-
-# ======================
-# Run
-# ======================
-if __name__ == "__main__":
-    uvicorn.run("DeployServer:app", host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
